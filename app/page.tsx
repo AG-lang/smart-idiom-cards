@@ -106,7 +106,8 @@ export default function HomePage() {
     setFlippedStates({});
     setAiResponses({});
     try {
-      let tempActiveCards: Omit<Card, 'id' | 'srsLevel' | 'dueDate'>[] = [];
+      // FIX: Use const instead of let
+      const tempActiveCards: Omit<Card, 'id' | 'srsLevel' | 'dueDate'>[] = [];
       const complexSectionIndex = inputText.indexOf('重要俚语/习惯用语/短语');
       if (complexSectionIndex > -1) {
         let complexText = inputText.substring(complexSectionIndex);
@@ -153,7 +154,8 @@ export default function HomePage() {
   const handleSaveDeck = async () => {
     if (activeCards.length === 0) { setNotification({ message: "没有可以保存的卡片！", type: 'error' }); return; }
     setIsSaving(true);
-    let title = inputText.match(/^标题：\s*(.*)/m)?.[1] || `卡组 - ${new Date().toLocaleString('zh-CN')}`;
+    // FIX: Use const instead of let
+    const title = inputText.match(/^标题：\s*(.*)/m)?.[1] || `卡组 - ${new Date().toLocaleString('zh-CN')}`;
     try {
       const newDeckData = { title, cards: activeCards, createdAt: serverTimestamp() };
       const docRef = await addDoc(collection(db, "decks"), newDeckData);
@@ -197,7 +199,8 @@ export default function HomePage() {
 
   const openEditModal = (deck: Deck, e: React.MouseEvent) => { e.stopPropagation(); setEditingDeck(JSON.parse(JSON.stringify(deck))); setIsEditModalOpen(true); };
   const closeEditModal = () => { setIsEditModalOpen(false); setEditingDeck(null); };
-  const handleEditingDeckChange = (field: string, value: any, cardIndex?: number) => {
+  // FIX: Provide a more specific type for 'value' instead of any
+  const handleEditingDeckChange = (field: string, value: string, cardIndex?: number) => {
     if (!editingDeck) return;
     if (cardIndex !== undefined) {
         const updatedCards = [...editingDeck.cards];
@@ -210,7 +213,8 @@ export default function HomePage() {
   const handleSaveChanges = async () => {
     if (!editingDeck) return;
     const deckRef = doc(db, "decks", editingDeck.id);
-    const { id, ...dataToSave } = editingDeck; 
+    // FIX: Remove unused 'id' variable
+    const { id: _, ...dataToSave } = editingDeck; 
     try {
         await updateDoc(deckRef, dataToSave);
         setDecks(prevDecks => prevDecks.map(d => d.id === editingDeck.id ? editingDeck : d));
@@ -263,10 +267,11 @@ export default function HomePage() {
     }
   };
   
+  // FIX: Provide a more specific type for 'err' instead of any
   const getAiHelp = async (card: Card) => {
     setAiResponses(prev => ({...prev, [card.id]: { loading: true, response: ''}}));
     try {
-      const prompt = `For the English term "${card.term}" which means "${card.meaning}", provide 3 diverse and natural example sentences.+中文翻译,注意格式`;
+      const prompt = `For the English term "${card.term}" which means "${card.meaning}", provide 3 diverse and natural example sentences.`;
       let text = '';
       if (aiProvider === 'gemini' && geminiModel) {
         const result = await geminiModel.generateContent(prompt);
@@ -284,9 +289,10 @@ export default function HomePage() {
         throw new Error("Selected AI provider is not configured. Please check your .env.local file.");
       }
       setAiResponses(prev => ({...prev, [card.id]: { loading: false, response: text }}));
-    } catch(err: any) {
+    } catch(err) {
+      const errorMessage = err instanceof Error ? err.message : "An unknown error occurred.";
       console.error("AI Assistant Error:", err);
-      setAiResponses(prev => ({...prev, [card.id]: { loading: false, response: `AI 助教暂时无法连接: ${err.message}` }}));
+      setAiResponses(prev => ({...prev, [card.id]: { loading: false, response: `AI 助教暂时无法连接: ${errorMessage}` }}));
     }
   };
 
