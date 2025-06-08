@@ -2,9 +2,10 @@
 'use client';
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { db } from '../firebase'; 
-import { collection, addDoc, getDocs, query, orderBy, serverTimestamp, Timestamp, doc, deleteDoc, updateDoc } from 'firebase/firestore';
-import { Sun, Moon, Save, LoaderCircle, LayoutList, Inbox, X, BrainCircuit, BotMessageSquare, Trash2, Search, Pencil, GraduationCap, BarChart2, Sparkles } from 'lucide-react';
+import { db, auth } from '../firebase'; 
+import { onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, User } from 'firebase/auth';
+import { collection, addDoc, getDocs, query, where, orderBy, serverTimestamp, Timestamp, doc, deleteDoc, updateDoc } from 'firebase/firestore';
+import { Sun, Moon, Save, LoaderCircle, LayoutList, Inbox, X, BrainCircuit, BotMessageSquare, Trash2, Search, Pencil, GraduationCap, BarChart2, Sparkles, LogOut } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import ReactMarkdown from 'react-markdown';
@@ -12,7 +13,7 @@ import remarkGfm from 'remark-gfm';
 
 // --- Data Structures ---
 interface Card { id: string; term: string; meaning: string; example: string; context: string; translation: string; srsLevel: number; dueDate: Timestamp; }
-interface Deck { id: string; title: string; cards: Card[]; createdAt: Timestamp; }
+interface Deck { id: string; title: string; cards: Card[]; createdAt: Timestamp; ownerId: string; }
 interface Notification { message: string; type: 'success' | 'error'; }
 type AiProvider = 'gemini' | 'deepseek';
 
@@ -30,12 +31,64 @@ const deepseekApiKey = process.env.NEXT_PUBLIC_DEEPSEEK_API_KEY || "";
 const genAI = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
 const geminiModel = genAI ? genAI.getGenerativeModel({ model: "gemini-1.5-flash"}) : null;
 
+// --- Authentication Component ---
+const AuthForm = ({ onAuthSuccess }: { onAuthSuccess: () => void }) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isLoginView, setIsLoginView] = useState(true);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleAuthAction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      if (isLoginView) {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        await createUserWithEmailAndPassword(auth, email, password);
+      }
+      onAuthSuccess();
+    } catch (err: any) {
+      setError(err.message.replace('Firebase: ', ''));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex justify-center items-center min-h-screen bg-slate-100 dark:bg-slate-900">
+      <div className="w-full max-w-md p-8 bg-white dark:bg-slate-800 rounded-2xl shadow-xl">
+        <h2 className="text-3xl font-bold mb-6 text-center text-slate-800 dark:text-white">{isLoginView ? '登录' : '注册'}</h2>
+        <form onSubmit={handleAuthAction} className="space-y-4">
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="邮箱" required className="w-full p-3 border border-slate-300 dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-700 focus:ring-2 focus:ring-blue-500"/>
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密码 (至少6位)" required className="w-full p-3 border border-slate-300 dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-700 focus:ring-2 focus:ring-blue-500"/>
+          {error && <p className="text-red-500 text-sm text-center">{error}</p>}
+          <button type="submit" disabled={loading} className="w-full bg-blue-600 text-white font-semibold py-3 px-4 rounded-lg hover:bg-blue-700 disabled:bg-slate-400 flex justify-center items-center">
+            {loading ? <LoaderCircle className="animate-spin" /> : (isLoginView ? '登录' : '注册')}
+          </button>
+        </form>
+        <p className="text-center mt-6 text-sm text-slate-600 dark:text-slate-400">
+          {isLoginView ? "还没有账户？" : "已有账户？"}
+          <button onClick={() => setIsLoginView(!isLoginView)} className="font-semibold text-blue-500 hover:underline ml-1">
+            {isLoginView ? '立即注册' : '立即登录'}
+          </button>
+        </p>
+      </div>
+    </div>
+  );
+};
+
+
 export default function HomePage() {
   // --- State Management ---
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [inputText, setInputText] = useState('');
   const [activeCards, setActiveCards] = useState<Card[]>([]);
   const [decks, setDecks] = useState<Deck[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [notification, setNotification] = useState<Notification | null>(null);
@@ -51,25 +104,33 @@ export default function HomePage() {
   const [aiResponses, setAiResponses] = useState<{[key: string]: {loading: boolean; response: string}}>({});
 
   // --- Effects ---
-  useEffect(() => { setHasMounted(true) }, []);
+  useEffect(() => {
+    setHasMounted(true);
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     const fetchDecks = async () => {
+      if (!user) { setDecks([]); return; }
       setIsLoading(true);
       try {
-        const q = query(collection(db, "decks"), orderBy("createdAt", "desc"));
+        const q = query(collection(db, "decks"), where("ownerId", "==", user.uid), orderBy("createdAt", "desc"));
         const querySnapshot = await getDocs(q);
         const fetchedDecks = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Deck));
         setDecks(fetchedDecks);
       } catch (err) {
         console.error("获取卡组失败:", err);
-        setNotification({ message: "无法从云端加载卡组", type: 'error' });
+        setNotification({ message: "无法从云端加载您的卡组", type: 'error' });
       } finally {
         setIsLoading(false);
       }
     };
-    fetchDecks();
-  }, []);
+    if (!authLoading) { fetchDecks(); }
+  }, [user, authLoading]);
 
   useEffect(() => {
     if (notification) {
@@ -84,29 +145,32 @@ export default function HomePage() {
     const lowercasedTerm = searchTerm.toLowerCase();
     return decks.filter(deck => 
       deck.title.toLowerCase().includes(lowercasedTerm) || 
-      deck.cards.some(card => card.term.toLowerCase().includes(lowercasedTerm))
+      (deck.cards && deck.cards.some(card => card.term.toLowerCase().includes(lowercasedTerm)))
     );
   }, [decks, searchTerm]);
   
   const learningStats = useMemo(() => {
     const stats = Array(SRS_INTERVALS_DAYS.length + 1).fill(0);
     decks.forEach(deck => {
-      deck.cards.forEach(card => {
-        const level = card.srsLevel || 0;
-        stats[level] = (stats[level] || 0) + 1;
-      });
+      if(deck.cards){
+        deck.cards.forEach(card => {
+          const level = card.srsLevel || 0;
+          stats[level] = (stats[level] || 0) + 1;
+        });
+      }
     });
     return stats.map((count, index) => ({ name: `等级 ${index}`, count }));
   }, [decks]);
 
   // --- Core & Helper Functions ---
+  const handleSignOut = async () => { await signOut(auth); };
+  
   const handleParseText = () => {
     setIsParsing(true);
     setActiveCards([]);
     setFlippedStates({});
     setAiResponses({});
     try {
-      // FIX: Use const instead of let
       const tempActiveCards: Omit<Card, 'id' | 'srsLevel' | 'dueDate'>[] = [];
       const complexSectionIndex = inputText.indexOf('重要俚语/习惯用语/短语');
       if (complexSectionIndex > -1) {
@@ -152,12 +216,12 @@ export default function HomePage() {
   };
 
   const handleSaveDeck = async () => {
+    if (!user) { setNotification({ message: "请先登录后再保存！", type: 'error' }); return; }
     if (activeCards.length === 0) { setNotification({ message: "没有可以保存的卡片！", type: 'error' }); return; }
     setIsSaving(true);
-    // FIX: Use const instead of let
     const title = inputText.match(/^标题：\s*(.*)/m)?.[1] || `卡组 - ${new Date().toLocaleString('zh-CN')}`;
     try {
-      const newDeckData = { title, cards: activeCards, createdAt: serverTimestamp() };
+      const newDeckData = { title, cards: activeCards, createdAt: serverTimestamp(), ownerId: user.uid };
       const docRef = await addDoc(collection(db, "decks"), newDeckData);
       const newDeck = { id: docRef.id, ...newDeckData, createdAt: Timestamp.now() } as Deck;
       setDecks(prevDecks => [newDeck, ...prevDecks]);
@@ -172,7 +236,7 @@ export default function HomePage() {
   };
 
   const loadDeck = (deck: Deck) => {
-    setActiveCards(deck.cards);
+    setActiveCards(deck.cards || []);
     setActiveDeckId(deck.id);
     setFlippedStates({});
     setAiResponses({});
@@ -199,7 +263,6 @@ export default function HomePage() {
 
   const openEditModal = (deck: Deck, e: React.MouseEvent) => { e.stopPropagation(); setEditingDeck(JSON.parse(JSON.stringify(deck))); setIsEditModalOpen(true); };
   const closeEditModal = () => { setIsEditModalOpen(false); setEditingDeck(null); };
-  // FIX: Provide a more specific type for 'value' instead of any
   const handleEditingDeckChange = (field: string, value: string, cardIndex?: number) => {
     if (!editingDeck) return;
     if (cardIndex !== undefined) {
@@ -213,9 +276,8 @@ export default function HomePage() {
   const handleSaveChanges = async () => {
     if (!editingDeck) return;
     const deckRef = doc(db, "decks", editingDeck.id);
-    // FIX: Remove unused 'id' variable
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-const { id: _, ...dataToSave } = editingDeck;
+    const { id: _, ...dataToSave } = editingDeck; 
     try {
         await updateDoc(deckRef, dataToSave);
         setDecks(prevDecks => prevDecks.map(d => d.id === editingDeck.id ? editingDeck : d));
@@ -230,6 +292,7 @@ const { id: _, ...dataToSave } = editingDeck;
 
   const getDueCards = useCallback((deck: Deck) => {
     const now = new Date();
+    if(!deck.cards) return [];
     return deck.cards.filter(card => card.dueDate && card.dueDate.toDate() <= now);
   }, []);
 
@@ -268,7 +331,6 @@ const { id: _, ...dataToSave } = editingDeck;
     }
   };
   
-  // FIX: Provide a more specific type for 'err' instead of any
   const getAiHelp = async (card: Card) => {
     setAiResponses(prev => ({...prev, [card.id]: { loading: true, response: ''}}));
     try {
@@ -290,17 +352,20 @@ const { id: _, ...dataToSave } = editingDeck;
         throw new Error("Selected AI provider is not configured. Please check your .env.local file.");
       }
       setAiResponses(prev => ({...prev, [card.id]: { loading: false, response: text }}));
-    } catch(err) {
-      const errorMessage = err instanceof Error ? err.message : "An unknown error occurred.";
+    } catch(err: any) {
       console.error("AI Assistant Error:", err);
-      setAiResponses(prev => ({...prev, [card.id]: { loading: false, response: `AI 助教暂时无法连接: ${errorMessage}` }}));
+      setAiResponses(prev => ({...prev, [card.id]: { loading: false, response: `AI 助教暂时无法连接: ${err.message}` }}));
     }
   };
 
-  if (!hasMounted) {
+  if (!hasMounted || authLoading) {
     return <div className="flex justify-center items-center min-h-screen bg-slate-50 dark:bg-slate-900"><LoaderCircle size={48} className="animate-spin text-blue-500" /></div>;
   }
   
+  if (!user) {
+    return <AuthForm onAuthSuccess={() => {}} />;
+  }
+
   const AiProviderToggle = () => (
     <div className="flex items-center gap-2 rounded-full bg-slate-200 dark:bg-slate-700 p-1">
       <button onClick={() => setAiProvider('gemini')} disabled={!geminiApiKey} className={`px-3 py-1 text-sm rounded-full transition-colors ${aiProvider === 'gemini' ? 'bg-white dark:bg-slate-900 shadow' : 'opacity-70'} disabled:opacity-30 disabled:cursor-not-allowed`}>Gemini</button>
@@ -344,8 +409,10 @@ const { id: _, ...dataToSave } = editingDeck;
           <header className="flex flex-wrap justify-between items-center mb-8 gap-4">
             <h1 className="text-3xl sm:text-4xl font-bold text-slate-900 dark:text-white flex items-center gap-3"><BrainCircuit size={36} className="text-blue-500"/>智能术语卡片</h1>
             <div className="flex items-center gap-4">
+              <span className="text-sm text-slate-600 dark:text-slate-400 hidden sm:inline">欢迎, {user.email}</span>
               <AiProviderToggle />
-              <button onClick={() => setTheme(prev => (prev === 'light' ? 'dark' : 'light'))} className="p-2 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors">{theme === 'light' ? <Moon size={24} /> : <Sun size={24} />}</button>
+              <button onClick={() => setTheme(prev => (prev === 'light' ? 'dark' : 'light'))} className="p-2 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors" title="切换主题">{theme === 'light' ? <Moon size={24} /> : <Sun size={24} />}</button>
+              <button onClick={handleSignOut} className="p-2 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 text-red-500" title="退出登录"><LogOut size={24} /></button>
             </div>
           </header>
 
@@ -415,7 +482,7 @@ const { id: _, ...dataToSave } = editingDeck;
 
           <section className="w-full mt-16">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4"><h2 className="text-3xl font-bold border-b-2 sm:border-b-0 border-blue-500 pb-2 sm:pb-0 flex items-center gap-2 flex-shrink-0"><LayoutList /> 我的云端卡组</h2><div className="relative w-full sm:w-72"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={20} /><input type="text" placeholder="搜索标题或术语..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full pl-10 pr-4 py-2 border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-700 focus:ring-2 focus:ring-blue-500"/></div></div>
-            {isLoading ? (<div className="flex justify-center items-center p-8"><LoaderCircle size={32} className="animate-spin text-blue-500" /></div>) : decks.length > 0 ? (filteredDecks.length > 0 ? (<div className="space-y-3">{filteredDecks.map(deck => {const dueCardsCount = getDueCards(deck).length; return (<div key={deck.id} onClick={() => loadDeck(deck)} className={`bg-white dark:bg-slate-800 p-4 rounded-lg shadow-md hover:shadow-xl hover:scale-[1.02] cursor-pointer transition-all flex flex-col sm:flex-row justify-between sm:items-center gap-4 group ${activeDeckId === deck.id ? 'ring-2 ring-blue-500' : ''}`}><div><p className="font-semibold text-lg text-blue-600 dark:text-blue-400">{deck.title}</p><p className="text-sm text-slate-500">{deck.cards.length} 张卡片</p></div><div className="flex items-center gap-2 self-end sm:self-center"><span className="text-sm text-slate-400 hidden lg:block">{formatTimestamp(deck.createdAt)}</span><button onClick={(e) => startReviewSession(deck, e)} disabled={dueCardsCount === 0} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:bg-slate-400 disabled:cursor-not-allowed transition-all text-sm"><GraduationCap size={16} />复习 ({dueCardsCount})</button><button onClick={(e) => openEditModal(deck, e)} className="p-2 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 hover:bg-blue-500 hover:text-white transition-all opacity-0 group-hover:opacity-100"><Pencil size={16} /></button><button onClick={(e) => handleDeleteDeck(deck.id, deck.title, e)} className="p-2 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 hover:bg-red-500 hover:text-white transition-all opacity-0 group-hover:opacity-100"><Trash2 size={16} /></button></div></div>)})}</div>) : (<div className="text-center p-8 bg-slate-100 dark:bg-slate-800 rounded-lg"><p className="text-slate-500">找不到匹配的卡组。</p><p className="text-slate-400 text-sm mt-1">请尝试更换搜索关键词。</p></div>)) : (<div className="text-center p-8 bg-slate-100 dark:bg-slate-800 rounded-lg"><Inbox size={48} className="mx-auto text-slate-400 mb-4" /><p className="text-slate-500">您的云端仓库是空的。</p><p className="text-slate-400 text-sm mt-1">请先生成卡片，然后点击“保存到云端”。</p></div>)}
+            {isLoading ? (<div className="flex justify-center items-center p-8"><LoaderCircle size={32} className="animate-spin text-blue-500" /></div>) : decks.length > 0 ? (filteredDecks.length > 0 ? (<div className="space-y-3">{filteredDecks.map(deck => {const dueCardsCount = getDueCards(deck).length; return (<div key={deck.id} onClick={() => loadDeck(deck)} className={`bg-white dark:bg-slate-800 p-4 rounded-lg shadow-md hover:shadow-xl hover:scale-[1.02] cursor-pointer transition-all flex flex-col sm:flex-row justify-between sm:items-center gap-4 group ${activeDeckId === deck.id ? 'ring-2 ring-blue-500' : ''}`}><div><p className="font-semibold text-lg text-blue-600 dark:text-blue-400">{deck.title}</p><p className="text-sm text-slate-500">{deck.cards.length} 张卡片</p></div><div className="flex items-center gap-2 self-end sm:self-center"><span className="text-sm text-slate-400 hidden lg:block">{formatTimestamp(deck.createdAt)}</span><button onClick={(e) => startReviewSession(deck, e)} disabled={dueCardsCount === 0} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:bg-slate-400 disabled:cursor-not-allowed transition-all text-sm"><GraduationCap size={16} />复习 ({dueCardsCount})</button><button onClick={(e) => openEditModal(deck, e)} className="p-2 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 hover:bg-blue-500 hover:text-white transition-all opacity-0 group-hover:opacity-100" title="编辑"><Pencil size={16} /></button><button onClick={(e) => handleDeleteDeck(deck.id, deck.title, e)} className="p-2 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 hover:bg-red-500 hover:text-white transition-all opacity-0 group-hover:opacity-100" title="删除"><Trash2 size={16} /></button></div></div>)})}</div>) : (<div className="text-center p-8 bg-slate-100 dark:bg-slate-800 rounded-lg"><p className="text-slate-500">找不到匹配的卡组。</p><p className="text-slate-400 text-sm mt-1">请尝试更换搜索关键词。</p></div>)) : (<div className="text-center p-8 bg-slate-100 dark:bg-slate-800 rounded-lg"><Inbox size={48} className="mx-auto text-slate-400 mb-4" /><p className="text-slate-500">您的云端仓库是空的。</p><p className="text-slate-400 text-sm mt-1">请先生成卡片，然后点击“保存到云端”。</p></div>)}
           </section>
 
           {isEditModalOpen && editingDeck && (
