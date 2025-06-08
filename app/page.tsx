@@ -50,8 +50,12 @@ const AuthForm = ({ onAuthSuccess }: { onAuthSuccess: () => void }) => {
         await createUserWithEmailAndPassword(auth, email, password);
       }
       onAuthSuccess();
-    } catch (err: any) {
-      setError(err.message.replace('Firebase: ', ''));
+    } catch (err: unknown) { // FIX: Use 'unknown' instead of 'any'
+      if (err instanceof Error) {
+        setError(err.message.replace('Firebase: ', ''));
+      } else {
+        setError("An unknown error occurred.");
+      }
     } finally {
       setLoading(false);
     }
@@ -352,9 +356,10 @@ export default function HomePage() {
         throw new Error("Selected AI provider is not configured. Please check your .env.local file.");
       }
       setAiResponses(prev => ({...prev, [card.id]: { loading: false, response: text }}));
-    } catch(err: any) {
+    } catch(err: unknown) { // FIX: Use 'unknown' instead of 'any'
+      const errorMessage = err instanceof Error ? err.message : "An unknown error occurred.";
       console.error("AI Assistant Error:", err);
-      setAiResponses(prev => ({...prev, [card.id]: { loading: false, response: `AI 助教暂时无法连接: ${err.message}` }}));
+      setAiResponses(prev => ({...prev, [card.id]: { loading: false, response: `AI 助教暂时无法连接: ${errorMessage}` }}));
     }
   };
 
