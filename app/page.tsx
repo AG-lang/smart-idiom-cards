@@ -214,7 +214,8 @@ export default function HomePage() {
     if (!editingDeck) return;
     const deckRef = doc(db, "decks", editingDeck.id);
     // FIX: Remove unused 'id' variable
-    const { id: _, ...dataToSave } = editingDeck; 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+const { id: _, ...dataToSave } = editingDeck;
     try {
         await updateDoc(deckRef, dataToSave);
         setDecks(prevDecks => prevDecks.map(d => d.id === editingDeck.id ? editingDeck : d));
